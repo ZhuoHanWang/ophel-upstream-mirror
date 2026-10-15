@@ -23,7 +23,7 @@ jobs:
     steps:
       # Security: pull_request_target has a writable token, so only base-branch code is executed.
       - name: Checkout trusted base revision
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 1
