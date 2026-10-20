@@ -9,6 +9,10 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### 🐛 Bug Fixes
+
+- **Gemini completion notifications** — Fixed premature alerts during thinking and missed alerts during consecutive replies, while respecting foreground notification preferences.
+
 ---
 
 ## [1.2.12][1.2.12] - 2026-10-12

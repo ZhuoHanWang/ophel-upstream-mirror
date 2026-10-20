@@ -4,6 +4,7 @@
  * 每个支持的站点（Gemini/ChatGPT/Claude 等）需要继承此类并实现抽象方法
  */
 
+import type { CompletionSnapshot } from "~core/completion-tracker"
 import type { MarkdownFixerConfig } from "~core/markdown-fixer"
 import { extractConversationTitleFromDocumentTitle } from "~utils/conversation-title"
 import { DOMToolkit } from "~utils/dom-toolkit"
@@ -753,6 +754,15 @@ export abstract class SiteAdapter {
    * 返回 true 时，只有在 DOM 生成态出现后，才把该轮网络请求视为真实生成。
    */
   requiresDomConfirmationForNetworkGeneration(): boolean {
+    return false
+  }
+
+  /** Opt in to per-reply completion tracking; other sites retain their existing lifecycle. */
+  getCompletionSnapshot(_pendingKeys: ReadonlySet<string>): CompletionSnapshot | null {
+    return null
+  }
+
+  isCompletionSubmitEvent(_event: Event): boolean {
     return false
   }
 

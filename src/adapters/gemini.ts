@@ -8,6 +8,7 @@ import {
   DOWNLOAD_ICON_TRAY_PATH,
 } from "~components/icons/DownloadIcon"
 import { SITE_IDS } from "~constants"
+import type { CompletionSnapshot } from "~core/completion-tracker"
 import {
   extractHeadingOutline,
   findHeadingByText,
@@ -6293,6 +6294,118 @@ export class GeminiAdapter extends SiteAdapter {
   }
 
   // ==================== 生成状态检测 ====================
+
+  private completionNodes = new WeakMap<Element, number>()
+  private completionNodeId = 0
+
+  private completionNodeIdentity(node: Element | null): number | null {
+    if (!node) return null
+    if (!this.completionNodes.has(node)) this.completionNodes.set(node, ++this.completionNodeId)
+    return this.completionNodes.get(node)!
+  }
+
+  private completionNodeVisible(node: Element): boolean {
+    if (!node.isConnected || !node.getClientRects().length) return false
+    const style = window.getComputedStyle(node)
+    return style.display !== "none" && style.visibility !== "hidden"
+  }
+
+  isCompletionSubmitEvent(event: Event): boolean {
+    const path = event.composedPath()
+    const composer = path.some(
+      (node) =>
+        node instanceof Element && node.matches('.ql-editor[contenteditable="true"], textarea'),
+    )
+    if (event instanceof KeyboardEvent) {
+      return (
+        composer &&
+        event.key === "Enter" &&
+        !event.shiftKey &&
+        !event.ctrlKey &&
+        !event.altKey &&
+        !event.metaKey &&
+        !event.isComposing
+      )
+    }
+    return (
+      event.type === "click" &&
+      path.some(
+        (node) =>
+          node instanceof Element &&
+          node.matches("button.send-button.submit, gem-icon-button.send-button.submit"),
+      )
+    )
+  }
+
+  getCompletionSnapshot(pendingKeys: ReadonlySet<string>): CompletionSnapshot {
+    const generating = Array.from(
+      document.querySelectorAll(this.config.generating.existsSelectors.join(", ")),
+    ).some((node) => this.completionNodeVisible(node))
+    const composer = Array.from(
+      document.querySelectorAll<HTMLElement>('.ql-editor[contenteditable="true"], textarea'),
+    ).find((node) => this.completionNodeVisible(node))
+    const composerReady =
+      !!composer &&
+      composer.getAttribute("aria-disabled") !== "true" &&
+      !composer.matches(":disabled") &&
+      !generating
+    const selector = ".conversation-container, conversation-container, .conversation-turn"
+    const containers = Array.from(document.querySelectorAll(selector)).filter(
+      (node) =>
+        node.querySelector("user-query, .user-query-container") &&
+        !node.parentElement?.closest(selector),
+    )
+    const turns = containers.map((container, index) => {
+      const key = container.id || `node-${this.completionNodeIdentity(container)}`
+      // Hash only the latest reply and unfinished replies in long conversations.
+      if (index !== containers.length - 1 && !pendingKeys.has(key))
+        return {
+          key,
+          hasUser: true,
+          hasAnswer: false,
+          signature: "history",
+          version: null,
+          busy: false,
+          generating: false,
+          finalActions: false,
+          mediaPending: false,
+        }
+      const response = container.querySelector(
+        "model-response, .model-response-container, .response-container",
+      )
+      const contents = response?.querySelector("message-content") || response
+      const markdown = contents?.querySelector(".markdown-main-panel, .markdown") || contents
+      const text = markdown?.textContent?.trim() || ""
+      const images = Array.from(contents?.querySelectorAll("img") || []).filter(
+        (image) =>
+          !image.closest(".katex, .model-response-label") && !image.classList.contains("katex-svg"),
+      )
+      const busySelector = '[aria-busy="true"], [role="progressbar"]'
+      const busy =
+        !!response &&
+        [response, ...response.querySelectorAll(busySelector)].some(
+          (node) => node.matches(busySelector) && this.completionNodeVisible(node),
+        )
+      const finalActions = Array.from(container.querySelectorAll("message-actions button")).some(
+        (node) => !node.matches(":disabled") && this.completionNodeVisible(node),
+      )
+      const mediaSignature = images
+        .map((image) => `${image.currentSrc || image.src}|${image.complete}|${image.naturalWidth}`)
+        .join(";")
+      return {
+        key,
+        hasUser: true,
+        hasAnswer: !!text || images.some((image) => image.complete && image.naturalWidth > 0),
+        signature: hashTextForCache(text + "|" + mediaSignature),
+        version: this.completionNodeIdentity(contents),
+        busy,
+        finalActions,
+        mediaPending: images.some((image) => !image.complete),
+        generating: index === containers.length - 1 && generating,
+      }
+    })
+    return { route: window.location.pathname, turns, composerReady }
+  }
 
   isGenerating(): boolean {
     return this.config.generating.existsSelectors.some((selector) => {

@@ -20,6 +20,8 @@ import {
 } from "~utils/messaging"
 import { type Settings } from "~utils/storage"
 
+import { CompletionTracker } from "./completion-tracker"
+
 const BACKGROUND_IDLE_TITLE_UPDATE_INTERVAL_MS = 15_000
 const DEFAULT_RENAME_INTERVAL_SECONDS = 5
 
@@ -43,6 +45,13 @@ export class TabManager {
   private currentDomCompletionObservedStart = false
   private domCompletionIntervalId: number | null = null
   private domCompletionTrackingStartedAt = 0
+  private completionTracker: CompletionTracker | null = null
+  private completionPollTimer: number | null = null
+  private readonly handleCompletionSubmit = (event: Event) => {
+    if (!this.adapter.isCompletionSubmitEvent(event)) return
+    this.stopNotificationPlayback()
+    this.completionTracker?.submit(Date.now())
+  }
 
   // 用户是否在前台看到过生成完成（用于避免误发通知）
   private userSawCompletion = false
@@ -146,6 +155,7 @@ export class TabManager {
     }
 
     this.isRunning = true
+    this.startCompletionTracking()
     this.startTitleObserver()
 
     this.updateTabName()
@@ -177,6 +187,11 @@ export class TabManager {
     if (!this.isRunning) return
 
     this.isRunning = false
+    if (this.completionPollTimer !== null) window.clearInterval(this.completionPollTimer)
+    this.completionPollTimer = null
+    this.completionTracker = null
+    document.removeEventListener("keydown", this.handleCompletionSubmit, true)
+    document.removeEventListener("click", this.handleCompletionSubmit, true)
     this.resetGenerationConfirmationState()
     this.stopTitleObserver()
     this.expectedTitle = null
@@ -331,6 +346,7 @@ export class TabManager {
 
     // DOM 检测的状态变更通知（用于没有网络监控的站点或后备检测）
     if (
+      !this.completionTracker &&
       this.lastAiState === "generating" &&
       !isGenerating &&
       this.isUserAway() &&
@@ -570,6 +586,9 @@ export class TabManager {
    * 获取当前是否正在生成
    */
   private isCurrentlyGenerating(): boolean {
+    if (this.completionTracker) {
+      return this.completionTracker.active || this.adapter.isGenerating()
+    }
     // 如果已确认完成，返回 false
     if (this.aiState === "completed") return false
     // 否则结合网络状态和 DOM 检测
@@ -581,6 +600,12 @@ export class TabManager {
   }
 
   private beginNetworkGeneration(payload?: MonitorEventPayload) {
+    if (this.completionTracker) {
+      this.stopNotificationPlayback()
+      this.completionTracker.networkStart(Date.now())
+      this.pollCompletion()
+      return
+    }
     this.stopNotificationPlayback()
 
     if (payload?.domCompletionRequired) {
@@ -766,7 +791,8 @@ export class TabManager {
 
     // 用户切换回页面时，检查 DOM 状态
     // 如果正在生成但 DOM 显示已完成，说明用户看到了完成状态
-    if (this.aiState === "generating" && !isAway) {
+    if (this.completionTracker) this.pollCompletion()
+    if (!this.completionTracker && this.aiState === "generating" && !isAway) {
       if (this.adapter.isGenerating && !this.adapter.isGenerating()) {
         this.userSawCompletion = true
       }
@@ -788,6 +814,11 @@ export class TabManager {
    */
   private onWindowFocus() {
     this.stopNotificationPlayback({ stopCurrentAudio: false })
+
+    if (this.completionTracker) {
+      this.onVisibilityChange()
+      return
+    }
 
     // 用户回到页面时，检查是否应该标记 userSawCompletion
     if (this.aiState === "generating") {
@@ -820,6 +851,11 @@ export class TabManager {
    * AI 任务完成处理（由 NetworkMonitor 触发）
    */
   private onAiComplete() {
+    if (this.completionTracker) {
+      // A shared network timer cannot finish or reset an individual reply.
+      this.pollCompletion()
+      return
+    }
     if (this.currentGenerationUsesDomCompletion) {
       // ChatGPT 思考模式下，/backend-api/f/conversation 的 complete 仅代表 handoff 结束，
       // 真正的完成要等 stop 按钮出现并最终消失。
@@ -841,6 +877,52 @@ export class TabManager {
     }
 
     this.finalizeAiCompletion()
+  }
+
+  private startCompletionTracking() {
+    const snapshot = this.adapter.getCompletionSnapshot(new Set())
+    if (!snapshot) return
+    this.completionTracker = new CompletionTracker(
+      ({ isLatest }) => {
+        const away = this.isUserAway()
+        // Completion belongs to this reply, never to another reply's focus flag.
+        if (away || this.settings.notifyWhenFocused) this.sendCompletionNotification()
+        if (isLatest) {
+          this.aiState = "completed"
+          this.completionViewed = !away
+        }
+        this.updateTabName(true)
+        this.scheduleNextTitleUpdate(true)
+      },
+      () => {
+        this.aiState = this.lastAiState = "idle"
+        this.userSawCompletion = false
+        this.completionViewed = false
+        this.resetGenerationConfirmationState()
+        this.stopNotificationPlayback()
+      },
+    )
+    this.completionTracker.observe(snapshot, Date.now())
+    this.pollCompletion()
+    document.addEventListener("keydown", this.handleCompletionSubmit, true)
+    document.addEventListener("click", this.handleCompletionSubmit, true)
+    this.completionPollTimer = window.setInterval(() => this.pollCompletion(), 200)
+  }
+
+  private pollCompletion() {
+    if (!this.isRunning || !this.completionTracker) return
+    const snapshot = this.adapter.getCompletionSnapshot(this.completionTracker.pendingKeys)
+    if (!snapshot) return
+    this.completionTracker.observe(snapshot, Date.now())
+    this.adapter.setNetworkGenerationState(this.completionTracker.active)
+    if (this.completionTracker.active && this.aiState !== "generating") {
+      this.lastAiState = this.aiState
+      this.aiState = "generating"
+      this.userSawCompletion = false
+      this.completionViewed = false
+      this.updateTabName()
+      this.scheduleNextTitleUpdate(true)
+    }
   }
 
   private finalizeAiCompletion() {
