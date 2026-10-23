@@ -41,6 +41,64 @@ test("existing completed history does not notify", () => {
   f.tracker.observe(snapshot([turn("old")]), 5000)
   assert.deepEqual(f.completed.length, 0)
 })
+
+test("history arriving after an empty initial snapshot does not start a round", () => {
+  const f = fixture()
+  f.tracker.observe(snapshot([turn("old", { busy: true, hasAnswer: false })]), 10)
+  assert.equal(f.tracker.active, false)
+  f.tracker.observe(snapshot([turn("old")]), 100)
+  f.tracker.observe(snapshot([turn("old")]), 5000)
+  assert.equal(f.completed.length, 0)
+})
+
+test("a busy history placeholder in the initial snapshot is not an active generation", () => {
+  const f = fixture([turn("old", { busy: true, hasAnswer: false })])
+  assert.equal(f.tracker.active, false)
+  f.tracker.observe(snapshot([turn("old")]), 100)
+  f.tracker.observe(snapshot([turn("old")]), 5000)
+  assert.equal(f.completed.length, 0)
+})
+
+test("completed history arriving in several batches never notifies", () => {
+  const f = fixture()
+  f.tracker.observe(snapshot([turn("old-one")]), 10)
+  f.tracker.observe(snapshot([turn("old-one"), turn("old-two")]), 100)
+  f.tracker.observe(snapshot([turn("old-one"), turn("old-two")]), 5000)
+  assert.equal(f.tracker.active, false)
+  assert.equal(f.completed.length, 0)
+})
+
+test("rehydrating a known history answer is not a regeneration", () => {
+  const f = fixture([turn("old")])
+  f.tracker.observe(snapshot([turn("old", { busy: true })]), 10)
+  f.tracker.observe(snapshot([turn("old", { signature: "hydrated", version: 2 })]), 100)
+  f.tracker.observe(snapshot([turn("old", { signature: "hydrated", version: 2 })]), 5000)
+  assert.equal(f.tracker.active, false)
+  assert.equal(f.completed.length, 0)
+})
+
+test("switching to an empty route then loading its history stays idle", () => {
+  const f = fixture()
+  f.tracker.submit(10)
+  f.tracker.observe(snapshot([turn("a", { generating: true })]), 20)
+  f.tracker.observe(snapshot([], { route: "/app/other" }), 100)
+  const history = snapshot([turn("old", { busy: true })], { route: "/app/other" })
+  f.tracker.observe(history, 200)
+  const ready = snapshot([turn("old"), turn("older")], { route: "/app/other" })
+  f.tracker.observe(ready, 300)
+  f.tracker.observe(ready, 5000)
+  assert.equal(f.tracker.active, false)
+  assert.equal(f.completed.length, 0)
+  assert.equal(f.resets.length, 1)
+})
+
+test("opening a conversation that is actually generating still tracks its completion", () => {
+  const f = fixture([turn("running", { generating: true, busy: true })])
+  assert.equal(f.tracker.active, true)
+  f.tracker.observe(snapshot([turn("running")]), 100)
+  f.tracker.observe(snapshot([turn("running")]), 1600)
+  assert.equal(f.completed.length, 1)
+})
 test("network silence while thinking never completes", () => {
   const f = fixture()
   f.tracker.submit(10)
@@ -85,7 +143,6 @@ test("a short answer can complete without observing a stop button", () => {
 test("user submission alone cannot notify using the previous answer", () => {
   const f = fixture([turn("old")])
   f.tracker.submit(10)
-  f.tracker.networkStart(10)
   f.tracker.observe(snapshot([turn("old")]), 20)
   f.tracker.observe(snapshot([turn("old")]), 10000)
   assert.deepEqual(f.completed.length, 0)
@@ -162,8 +219,9 @@ test("a reply cleared and regenerated to identical text still completes once", (
   assert.deepEqual(f.completed.length, 1)
 })
 
-test("regeneration with only a busy indicator starts a separate round", () => {
+test("requested regeneration with only a busy indicator starts a separate round", () => {
   const f = fixture([turn("a")])
+  f.tracker.submit(1)
   f.tracker.observe(snapshot([turn("a", { busy: true })]), 10)
   f.tracker.observe(snapshot([turn("a", { signature: "regenerated" })]), 100)
   f.tracker.observe(snapshot([turn("a", { signature: "regenerated" })]), 1600)

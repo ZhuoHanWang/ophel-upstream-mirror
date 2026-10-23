@@ -1,5 +1,5 @@
 import { collectChangedElements } from "~utils/dom-mutations"
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 
 import type { QuickQuoteSupportMode, SiteAdapter } from "~adapters/base"
 import { CheckIcon, CopyIcon, MoreHorizontalIcon } from "~components/icons"
@@ -36,6 +36,7 @@ import {
 } from "~utils/dom-toolkit"
 import { t } from "~utils/i18n"
 import { formatMarkdownQuote, type ParsedVariable } from "~utils/prompt-variables"
+import { selectionToMarkdown } from "~utils/selection-markdown"
 import { showToast } from "~utils/toast"
 
 interface QuickQuoteActionsProps {
@@ -47,6 +48,8 @@ interface SelectionState {
   text: string
   range: Range
   rect: DOMRect
+  sessionId: string
+  pathname: string
 }
 
 interface PendingChainRun {
@@ -220,11 +223,29 @@ const isSelectionInConversation = (range: Range, adapter: SiteAdapter): boolean 
   )
 }
 
-const getSelectionRect = (range: Range): DOMRect | null => {
+const getSelectionRect = (range: Range, selection: Selection): DOMRect | null => {
+  // The active endpoint follows the drag direction. Whole-range rects can also
+  // include positioned controls (for example, bookmarks far below the text).
+  if (selection.focusNode) {
+    const focusRange = range.cloneRange()
+    focusRange.setStart(selection.focusNode, selection.focusOffset)
+    focusRange.collapse(true)
+    const focusRect = focusRange.getBoundingClientRect()
+    if (focusRect.height > 0) return focusRect
+  }
+
+  const isBackward =
+    selection.focusNode === range.startContainer && selection.focusOffset === range.startOffset
   const rects = Array.from(range.getClientRects()).filter(
-    (rect) => rect.width > 0 && rect.height > 0,
+    (rect) =>
+      rect.width > 0 &&
+      rect.height > 0 &&
+      rect.bottom > 0 &&
+      rect.top < window.innerHeight &&
+      rect.right > 0 &&
+      rect.left < window.innerWidth,
   )
-  return rects[rects.length - 1] || range.getBoundingClientRect() || null
+  return (isBackward ? rects[0] : rects[rects.length - 1]) || null
 }
 
 const truncateText = (text: string, max = 72): string => {
@@ -666,7 +687,12 @@ export const QuickQuoteActions: React.FC<QuickQuoteActionsProps> = ({ adapter, p
   const [queueGateVisible, setQueueGateVisible] = useState(false)
   const [copySucceeded, setCopySucceeded] = useState(false)
   const isMouseSelectingRef = useRef(false)
+  const popoverRef = useRef<HTMLDivElement>(null)
   const copyFeedbackTimerRef = useRef<number | null>(null)
+  const selectionContextCacheRef = useRef<{
+    selection: SelectionState
+    context: PromptChainSelectionContext
+  } | null>(null)
 
   const visibleChains = useMemo(
     () =>
@@ -701,8 +727,30 @@ export const QuickQuoteActions: React.FC<QuickQuoteActionsProps> = ({ adapter, p
   const clearSelection = useCallback(() => {
     setSelectionState(null)
     const selection = window.getSelection()
-    selection?.removeAllRanges()
-  }, [])
+    if (
+      selection &&
+      selection.rangeCount > 0 &&
+      isSelectionInConversation(selection.getRangeAt(0), adapter)
+    ) {
+      selection.removeAllRanges()
+    }
+  }, [adapter])
+
+  const readSelection = useCallback((): SelectionState | null => {
+    const selection = window.getSelection()
+    if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null
+
+    const range = selection.getRangeAt(0).cloneRange()
+    if (!isSelectionInConversation(range, adapter)) return null
+
+    const text = selectionToMarkdown(range)
+    if (!text || text.length > MAX_SELECTION_LENGTH) return null
+
+    const rect = getSelectionRect(range, selection)
+    if (!rect || rect.height === 0) return null
+
+    return { text, range, rect, sessionId: adapter.getSessionId(), pathname: location.pathname }
+  }, [adapter])
 
   const refreshSelection = useCallback(() => {
     if (!selectionActionsEnabled) {
@@ -710,26 +758,8 @@ export const QuickQuoteActions: React.FC<QuickQuoteActionsProps> = ({ adapter, p
       return
     }
 
-    const selection = window.getSelection()
-    if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
-      setSelectionState(null)
-      return
-    }
-
-    const text = selection.toString().trim()
-    if (!text || text.length > MAX_SELECTION_LENGTH) {
-      setSelectionState(null)
-      return
-    }
-
-    const range = selection.getRangeAt(0).cloneRange()
-    if (!isSelectionInConversation(range, adapter)) {
-      setSelectionState(null)
-      return
-    }
-
-    const rect = getSelectionRect(range)
-    if (!rect || rect.width === 0 || rect.height === 0) {
+    const nextSelection = readSelection()
+    if (!nextSelection) {
       setSelectionState(null)
       return
     }
@@ -743,15 +773,23 @@ export const QuickQuoteActions: React.FC<QuickQuoteActionsProps> = ({ adapter, p
         if (
           currentSelection &&
           !currentSelection.isCollapsed &&
-          currentSelection.toString().trim() === text
+          currentSelection.rangeCount > 0 &&
+          currentSelection
+            .getRangeAt(0)
+            .compareBoundaryPoints(Range.START_TO_START, nextSelection.range) === 0 &&
+          currentSelection
+            .getRangeAt(0)
+            .compareBoundaryPoints(Range.END_TO_END, nextSelection.range) === 0 &&
+          adapter.getSessionId() === nextSelection.sessionId &&
+          location.pathname === nextSelection.pathname
         ) {
-          setSelectionState({ text, range, rect })
+          setSelectionState(nextSelection)
         }
       }, 100)
     } else {
-      setSelectionState({ text, range, rect })
+      setSelectionState(nextSelection)
     }
-  }, [adapter, selectionActionsEnabled])
+  }, [adapter, readSelection, selectionActionsEnabled])
 
   useEffect(() => {
     if (!selectionState || overflowChains.length === 0) {
@@ -834,22 +872,81 @@ export const QuickQuoteActions: React.FC<QuickQuoteActionsProps> = ({ adapter, p
     }
   }, [refreshSelection, selectionActionsEnabled])
 
+  const buildSelectionContext = useCallback(
+    (selection: SelectionState): PromptChainSelectionContext => {
+      const quoteRef = quickQuoteEnabled
+        ? createPromptQuoteReference({
+            selectedText: selection.text,
+            adapter,
+            range: selection.range,
+          })
+        : null
+
+      return {
+        selectedText: selection.text,
+        quoteText: quoteRef?.quoteText ?? formatMarkdownQuote(selection.text),
+        quoteRef: quoteRef || undefined,
+      }
+    },
+    [adapter, quickQuoteEnabled],
+  )
+
+  useEffect(() => {
+    selectionContextCacheRef.current = null
+    if (!selectionState) return
+
+    const frame = window.requestAnimationFrame(() => {
+      if (
+        selectionState.range.startContainer.isConnected &&
+        adapter.getSessionId() === selectionState.sessionId &&
+        location.pathname === selectionState.pathname
+      ) {
+        selectionContextCacheRef.current = {
+          selection: selectionState,
+          context: buildSelectionContext(selectionState),
+        }
+      }
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [adapter, buildSelectionContext, selectionState])
+
   const createSelectionContext = useCallback((): PromptChainSelectionContext | null => {
     if (!selectionState) return null
-    const quoteRef = quickQuoteEnabled
-      ? createPromptQuoteReference({
-          selectedText: selectionState.text,
-          adapter,
-          range: selectionState.range,
-        })
-      : null
 
-    return {
-      selectedText: selectionState.text,
-      quoteText: formatMarkdownQuote(selectionState.text),
-      quoteRef: quoteRef || undefined,
+    const liveSelection = window.getSelection()
+    const liveRange =
+      liveSelection && !liveSelection.isCollapsed && liveSelection.rangeCount > 0
+        ? liveSelection.getRangeAt(0)
+        : null
+    const sameRange =
+      liveRange &&
+      liveRange.startContainer === selectionState.range.startContainer &&
+      liveRange.startOffset === selectionState.range.startOffset &&
+      liveRange.endContainer === selectionState.range.endContainer &&
+      liveRange.endOffset === selectionState.range.endOffset
+    const selection = liveRange && !sameRange ? readSelection() : selectionState
+    if (
+      !selection ||
+      !selection.range.startContainer.isConnected ||
+      adapter.getSessionId() !== selection.sessionId ||
+      location.pathname !== selection.pathname
+    ) {
+      return null
     }
-  }, [adapter, quickQuoteEnabled, selectionState])
+
+    const cached = selectionContextCacheRef.current
+    if (
+      cached?.selection === selection &&
+      (!cached.context.quoteRef ||
+        cached.context.quoteRef.anchor.cid === (adapter.getCurrentCid() || undefined))
+    ) {
+      return cached.context
+    }
+
+    const context = buildSelectionContext(selection)
+    selectionContextCacheRef.current = { selection, context }
+    return context
+  }, [adapter, buildSelectionContext, readSelection, selectionState])
 
   const openPromptQueueSettings = useCallback(() => {
     setQueueGateVisible(false)
@@ -884,8 +981,12 @@ export const QuickQuoteActions: React.FC<QuickQuoteActionsProps> = ({ adapter, p
   const handleQuote = useCallback(async () => {
     if (!selectionState) return
 
-    const content = formatMarkdownQuote(selectionState.text) + "\n\n"
     const selection = createSelectionContext()
+    if (!selection) {
+      clearSelection()
+      return
+    }
+    const content = selection.quoteText + "\n\n"
     rememberQuickQuoteReferenceForContent(content, selection?.quoteRef)
     const contentWithMarker = appendQuickQuoteMarker(content, selection?.quoteRef)
     const inserted = await promptManager.insertPrompt(contentWithMarker)
@@ -982,7 +1083,10 @@ export const QuickQuoteActions: React.FC<QuickQuoteActionsProps> = ({ adapter, p
       setChainMenuOpen(false)
 
       const selection = createSelectionContext()
-      if (!selection) return
+      if (!selection) {
+        clearSelection()
+        return
+      }
 
       if (!promptQueueEnabled && !canRunChainWithoutPromptQueue(chain)) {
         setPendingChainRun(null)
@@ -993,7 +1097,7 @@ export const QuickQuoteActions: React.FC<QuickQuoteActionsProps> = ({ adapter, p
 
       prepareChainRun(chain, selection)
     },
-    [createSelectionContext, prepareChainRun, promptQueueEnabled, selectionState],
+    [clearSelection, createSelectionContext, prepareChainRun, promptQueueEnabled, selectionState],
   )
 
   const popoverStyle = useMemo<React.CSSProperties>(() => {
@@ -1002,39 +1106,27 @@ export const QuickQuoteActions: React.FC<QuickQuoteActionsProps> = ({ adapter, p
     return { left, top }
   }, [selectionState, adapter])
 
-  // 动态调整位置以避让原生悬浮框（延迟检测）
-  useEffect(() => {
-    if (!selectionState) return
-    const mode = adapter.getQuickQuoteSupportMode()
-    if (mode !== "native") return
-
+  useLayoutEffect(() => {
+    const popover = popoverRef.current
+    if (!selectionState || !popover) return
     const adjustPosition = () => {
-      const nativeSelectors = adapter.getNativeQuotePopoverSelectors()
-      if (nativeSelectors.length === 0) return
-
-      let nativePopover: Element | null = null
-      for (const selector of nativeSelectors) {
-        const element = document.querySelector(selector)
-        if (element && isVisibleInViewport(element)) {
-          nativePopover = element
-          break
-        }
-      }
-
-      if (nativePopover) {
-        // 检测到原生悬浮框，重新计算位置
-        const popoverElement = document.querySelector(".gh-quick-quote-popover")
-        if (popoverElement instanceof HTMLElement) {
-          const { left, top } = calculatePopoverPosition(selectionState.rect, adapter)
-          popoverElement.style.left = `${left}px`
-          popoverElement.style.top = `${top}px`
-        }
-      }
+      const { left, top } = calculatePopoverPosition(selectionState.rect, adapter)
+      const { width, height } = popover.getBoundingClientRect()
+      // CSS centers the popover with translateX(-50%); constrain its full bounds.
+      const minLeft = POPOVER_MARGIN + width / 2
+      const maxLeft = window.innerWidth - POPOVER_MARGIN - width / 2
+      popover.style.left = `${Math.max(minLeft, Math.min(maxLeft, left))}px`
+      popover.style.top = `${Math.max(
+        POPOVER_MARGIN,
+        Math.min(window.innerHeight - POPOVER_MARGIN - height, top),
+      )}px`
     }
 
-    // 延迟检测，给原生悬浮框渲染时间
-    const timer = setTimeout(adjustPosition, 100)
-    return () => clearTimeout(timer)
+    adjustPosition()
+    if (adapter.getQuickQuoteSupportMode() === "native") {
+      const timer = window.setTimeout(adjustPosition, 100)
+      return () => window.clearTimeout(timer)
+    }
   }, [selectionState, adapter])
 
   if (!selectionState && !pendingChainRun) {
@@ -1046,6 +1138,7 @@ export const QuickQuoteActions: React.FC<QuickQuoteActionsProps> = ({ adapter, p
       <QuickQuoteRenderer adapter={adapter} enabled={quickQuoteEnabled} />
       {selectionState && (
         <div
+          ref={popoverRef}
           className="gh-quick-quote-popover gh-interactive"
           style={popoverStyle}
           onMouseDown={(event) => {

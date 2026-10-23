@@ -1,6 +1,7 @@
 import type { PlasmoCSConfig } from "plasmo"
 
 import { installGeminiCanvasCodeBridge } from "~core/gemini-canvas-code-bridge"
+import { installGeminiComposerBridge } from "~core/gemini-composer-bridge"
 
 export const config: PlasmoCSConfig = {
   matches: ["https://gemini.google.com/*"],
@@ -9,3 +10,4 @@ export const config: PlasmoCSConfig = {
 }
 
 installGeminiCanvasCodeBridge(window)
+installGeminiComposerBridge(window)

@@ -27,7 +27,7 @@ interface Round {
   quietSince: number | null
 }
 
-/** Network silence is only a start hint; each reply needs its own DOM completion evidence. */
+/** Only submitted or visibly generating replies can produce a completion event. */
 export class CompletionTracker {
   private sequence = 0
   private initialized = false
@@ -36,9 +36,7 @@ export class CompletionTracker {
   private rounds = new Map<string, Round>()
   private lastLatest: string | null = null
   private lastGenerating = false
-  private lastBusy = false
   private intentUntil = 0
-  private networkUntil = 0
 
   constructor(
     private complete: (event: { round: number; isLatest: boolean }) => void,
@@ -56,10 +54,6 @@ export class CompletionTracker {
 
   submit(now: number) {
     this.intentUntil = now + 30_000
-  }
-
-  networkStart(now: number) {
-    this.networkUntil = now + 30_000
   }
 
   private startRound(turn: CompletionTurn, now: number, existing = false) {
@@ -84,9 +78,8 @@ export class CompletionTracker {
     const latest = snapshot.turns.at(-1)
     this.lastLatest = latest?.key ?? null
     this.lastGenerating = !!latest?.generating
-    this.lastBusy = !!latest?.busy
     this.initialized = true
-    if (latest && (latest.generating || latest.busy)) this.startRound(latest, now)
+    if (latest?.generating) this.startRound(latest, now)
   }
 
   observe(snapshot: CompletionSnapshot, now: number) {
@@ -102,7 +95,7 @@ export class CompletionTracker {
         (this.active || now < this.intentUntil)
       if (assigningFirstId) this.route = snapshot.route
       else {
-        this.intentUntil = this.networkUntil = 0
+        this.intentUntil = 0
         this.resetOwner()
         this.baseline(snapshot, now)
         return
@@ -111,21 +104,13 @@ export class CompletionTracker {
 
     const latest = snapshot.turns.at(-1)
     const latestKey = latest?.key ?? null
-    const appended =
-      this.lastLatest &&
-      snapshot.turns.some((turn) => turn.key === this.lastLatest) &&
-      latestKey !== this.lastLatest
-    const rising =
-      (latest?.generating && (!this.lastGenerating || latestKey !== this.lastLatest)) ||
-      (latest?.busy && (!this.lastBusy || latestKey !== this.lastLatest))
+    const rising = latest?.generating && (!this.lastGenerating || latestKey !== this.lastLatest)
+    // Restored history may append turns, replace answer nodes and show busy
+    // indicators. None of those changes proves that a new reply was requested.
     if (
       latest?.hasUser &&
       !this.known.has(latest.key) &&
-      (appended ||
-        now < this.intentUntil ||
-        now < this.networkUntil ||
-        latest.generating ||
-        latest.busy)
+      (now < this.intentUntil || latest.generating)
     ) {
       this.startRound(latest, now)
     } else if (latest && (rising || (now < this.intentUntil && latest.busy))) {
@@ -168,6 +153,5 @@ export class CompletionTracker {
     }
     this.lastLatest = latestKey
     this.lastGenerating = !!latest?.generating
-    this.lastBusy = !!latest?.busy
   }
 }

@@ -16,6 +16,11 @@ import type {
 
 export const MSG_SHOW_NOTIFICATION = "SHOW_NOTIFICATION"
 export const MSG_FOCUS_TAB = "FOCUS_TAB"
+export const MSG_WAIT_COMPLETION_POLL = "WAIT_COMPLETION_POLL"
+
+export interface WaitCompletionPollMessage {
+  type: typeof MSG_WAIT_COMPLETION_POLL
+}
 
 export interface ShowNotificationPayload {
   title: string
@@ -340,6 +345,7 @@ export interface CheckClaudeGeneratingResponse {
 export type ExtensionMessage =
   | ShowNotificationMessage
   | FocusTabMessage
+  | WaitCompletionPollMessage
   | ProxyFetchMessage
   | CheckRemoteConfigMessage
   | GetRemoteConfigStateMessage
@@ -402,6 +408,7 @@ export interface AIStudioModelsResponse {
 }
 
 interface BackgroundResponseMap {
+  [MSG_WAIT_COMPLETION_POLL]: BasicBackgroundResponse
   [MSG_CHECK_REMOTE_CONFIG]: CheckRemoteConfigResponse
   [MSG_GET_REMOTE_CONFIG_STATE]: GetRemoteConfigStateResponse
   [MSG_IGNORE_REMOTE_CONFIG_PATCH]: BasicBackgroundResponse

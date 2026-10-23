@@ -29,6 +29,7 @@ import {
 import { getKatexStylesText as resolveKatexStylesText } from "../katex"
 import { renderKatexToMathML, renderKatexToString } from "../katex-render"
 import { extensionStorage } from "./storage"
+import { startCompletionPolling } from "./completion-polling"
 
 export { extensionStorage }
 
@@ -211,6 +212,8 @@ export const platform: Platform = {
       body: options.message,
     })
   },
+
+  startCompletionPolling,
 
   getNotificationSoundUrl(presetId: string): string | undefined {
     const path = notificationSoundPaths[presetId]

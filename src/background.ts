@@ -45,6 +45,7 @@ import {
   MSG_SWITCH_NEXT_CLAUDE_KEY,
   MSG_TEST_CLAUDE_TOKEN,
   MSG_WEBDAV_REQUEST,
+  MSG_WAIT_COMPLETION_POLL,
   type ExtensionMessage,
 } from "~utils/messaging"
 import {
@@ -426,6 +427,12 @@ async function setupDynamicRules() {
 // 消息监听 - 与 Content Script 通信
 chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendResponse) => {
   switch (message.type) {
+    case MSG_WAIT_COMPLETION_POLL:
+      // A response wakes the content script even when page timers are throttled.
+      // Only pending replies request another tick, so idle tabs do not keep the worker alive.
+      setTimeout(() => sendResponse({ success: true }), 1000)
+      return true
+
     case MSG_SHOW_NOTIFICATION: {
       // 将 tabId/windowId 编码进 notifId，SW 重启后点击通知仍可正确跳转
       const tabId = sender.tab?.id

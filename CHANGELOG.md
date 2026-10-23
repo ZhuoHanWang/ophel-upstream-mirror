@@ -11,7 +11,7 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### 🐛 Bug Fixes
 
-- **Gemini completion notifications** — Fixed premature alerts during thinking and missed alerts during consecutive replies, while respecting foreground notification preferences.
+- **Gemini notifications and quoting** — Fixed premature or missed reply alerts and false alerts when reopening chats, while respecting foreground notification preferences; quotes now preserve formulas and formatting, avoid long insertion delays and visible navigation codes, and keep selection actions on screen when selecting upward.
 
 ---
 

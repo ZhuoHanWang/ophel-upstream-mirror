@@ -65,6 +65,10 @@ import {
   GEMINI_CANVAS_CODE_RESPONSE_EVENT,
   installGeminiCanvasCodeBridge,
 } from "~core/gemini-canvas-code-bridge"
+import {
+  insertGeminiPromptViaBridge,
+  installGeminiComposerBridge,
+} from "~core/gemini-composer-bridge"
 import { WatermarkRemover } from "~core/watermark-remover"
 import {
   SiteAdapter,
@@ -2660,22 +2664,17 @@ export class GeminiAdapter extends SiteAdapter {
       return false
     }
 
+    const hadEditorFocus =
+      document.activeElement === editor || editor.contains(document.activeElement)
+
     editor.focus()
     if (document.activeElement !== editor && !editor.contains(document.activeElement)) {
       console.warn("[Ophel] insertPrompt: focus failed")
       return false
     }
 
-    try {
-      document.execCommand("selectAll", false, undefined)
-      const success = document.execCommand("insertText", false, content)
-      if (!success) throw new Error("execCommand returned false")
-    } catch {
-      editor.textContent = content
-      editor.dispatchEvent(new Event("input", { bubbles: true }))
-      editor.dispatchEvent(new Event("change", { bubbles: true }))
-    }
-    return true
+    // 原生 insertText 会逐行触发布局；空白输入框也通过 Quill 一次写入。
+    return insertGeminiPromptViaBridge(editor, content, hadEditorFocus)
   }
 
   clearTextarea(): void {
@@ -5245,6 +5244,7 @@ export class GeminiAdapter extends SiteAdapter {
     const unsafeWin = (globalScope as Record<string, unknown>).unsafeWindow
     if (unsafeWin && typeof unsafeWin === "object") {
       installGeminiCanvasCodeBridge(unsafeWin as Window)
+      installGeminiComposerBridge(unsafeWin as Window)
     }
 
     if (!document.documentElement?.hasAttribute?.("data-ophel-gemini-canvas-main")) return null
@@ -6332,7 +6332,9 @@ export class GeminiAdapter extends SiteAdapter {
       path.some(
         (node) =>
           node instanceof Element &&
-          node.matches("button.send-button.submit, gem-icon-button.send-button.submit"),
+          (node.matches("button.send-button.submit, gem-icon-button.send-button.submit") ||
+            (node.matches("message-actions button") &&
+              Boolean(node.querySelector('mat-icon[fonticon="refresh"]')))),
       )
     )
   }
@@ -6463,6 +6465,7 @@ export class GeminiAdapter extends SiteAdapter {
     const unsafeWin = (globalScope as Record<string, unknown>).unsafeWindow
     if (unsafeWin && typeof unsafeWin === "object") {
       installGeminiCanvasCodeBridge(unsafeWin as Window)
+      installGeminiComposerBridge(unsafeWin as Window)
     }
 
     if (!this.myStuffEnhancer) {

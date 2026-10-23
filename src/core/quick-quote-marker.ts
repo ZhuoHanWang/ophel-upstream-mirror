@@ -391,6 +391,9 @@ export const stripQuickQuoteMarkers = (content: string): string => {
     .trim()
 }
 
+export const getQuickQuoteEditorContent = (content: string): string =>
+  hasQuickQuoteMarker(content) ? stripQuickQuoteMarkers(content) : content
+
 const stripQuickQuoteMarkersPreservingSpacing = (content: string): string => {
   return stripQuickQuoteMarkerSyntax(content).replace(new RegExp(QUICK_QUOTE_MARKER_LABEL, "g"), "")
 }
@@ -500,7 +503,7 @@ function hasQuickQuoteMarkerResidue(element: Element): boolean {
 export const rememberQuickQuoteReferencesFromContent = (content: string): void => {
   const visibleContent = stripQuickQuoteMarkers(content)
   extractQuickQuoteMarkerEntriesFromText(content).forEach((entry) => {
-    rememberQuickQuoteReference(
+    rememberQuickQuoteReferenceForContent(
       visibleContent,
       pendingQuickQuoteReferenceById.get(entry.id) || entry.reference,
     )

@@ -192,6 +192,9 @@ export interface Platform {
    */
   notify(options: NotifyOptions): void
 
+  /** Poll pending replies; returns a function that stops further checks. */
+  startCompletionPolling(poll: () => void): () => void
+
   /**
    * 获取通知音资源地址
    */

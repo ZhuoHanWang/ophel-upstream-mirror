@@ -67,13 +67,16 @@ const shouldSkipTextNode = (node: Text): boolean => {
   )
 }
 
-const buildNormalizedTextIndex = (root: Element): TextIndex => {
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+const createTextWalker = (root: Element): TreeWalker =>
+  document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode: (node) =>
       node instanceof Text && !shouldSkipTextNode(node)
         ? NodeFilter.FILTER_ACCEPT
         : NodeFilter.FILTER_REJECT,
   })
+
+const buildNormalizedTextIndex = (root: Element): TextIndex => {
+  const walker = createTextWalker(root)
   const positions: TextPosition[] = []
   let text = ""
   let lastWasSpace = true
@@ -107,33 +110,45 @@ const buildNormalizedTextIndex = (root: Element): TextIndex => {
   return { text, positions }
 }
 
-const findSelectionIndexInRoot = (
-  textIndex: TextIndex,
+const buildSelectionTextSnapshot = (
+  root: Element,
   range: Range,
   normalizedSelection: string,
-): number => {
-  let firstInRange = -1
-  let lastInRange = -1
+): { text: string; selectionIndex: number } => {
+  const walker = createTextWalker(root)
+  const chunks: string[] = []
+  let rawLength = 0
+  let rawSelectionStart = -1
+  let current = walker.nextNode()
 
-  for (let index = 0; index < textIndex.positions.length; index += 1) {
-    const position = textIndex.positions[index]
-    try {
-      if (range.isPointInRange(position.node, position.offset)) {
-        if (firstInRange < 0) firstInRange = index
-        lastInRange = index
+  while (current) {
+    const node = current as Text
+    if (rawSelectionStart < 0) {
+      if (node === range.startContainer) {
+        rawSelectionStart = rawLength + range.startOffset
+      } else if (range.isPointInRange(node, 0)) {
+        rawSelectionStart = rawLength
       }
-    } catch {
-      // Ignore detached or cross-root points; fall back to text search below.
     }
+
+    chunks.push(node.data)
+    rawLength += node.data.length
+    current = walker.nextNode()
   }
 
-  if (firstInRange >= 0 && lastInRange >= firstInRange) {
-    const selectedSlice = textIndex.text.slice(firstInRange, lastInRange + 1)
-    const offsetInSlice = selectedSlice.indexOf(normalizedSelection)
-    return offsetInSlice >= 0 ? firstInRange + offsetInSlice : firstInRange
+  const rawText = chunks.join("")
+  const text = normalizeText(rawText)
+  if (rawSelectionStart < 0) {
+    return { text, selectionIndex: text.indexOf(normalizedSelection) }
   }
 
-  return textIndex.text.indexOf(normalizedSelection)
+  // Capture the DOM boundary once per text node; per-character positions are
+  // only needed when highlighting a quote later, not while inserting it.
+  while (rawSelectionStart < rawText.length && /\s/.test(rawText[rawSelectionStart])) {
+    rawSelectionStart += 1
+  }
+  const selectionIndex = rawText.slice(0, rawSelectionStart).replace(/\s+/g, " ").trimStart().length
+  return { text, selectionIndex }
 }
 
 const getRootIndex = (root: Element, adapter: SiteAdapter): number | undefined => {
@@ -180,10 +195,12 @@ export const createPromptSelectionAnchor = ({
   const root = findSelectionMessageRoot(range, adapter)
   if (!root) return null
 
-  const textIndex = buildNormalizedTextIndex(root)
-  const rootText = textIndex.text
   const normalizedSelection = normalizeText(selectedText)
-  const selectionIndex = findSelectionIndexInRoot(textIndex, range, normalizedSelection)
+  const { text: rootText, selectionIndex } = buildSelectionTextSnapshot(
+    root,
+    range,
+    normalizedSelection,
+  )
 
   // Use longer context for short text to improve matching accuracy
   const contextChars =
@@ -245,7 +262,12 @@ export const createPromptQuoteReference = ({
   adapter: SiteAdapter
   range: Range
 }): PromptQuoteReference | null => {
-  const anchor = createPromptSelectionAnchor({ range, selectedText, adapter })
+  // Markdown is sent to the editor; source matching needs the original DOM text.
+  const anchor = createPromptSelectionAnchor({
+    range,
+    selectedText: range.toString().trim(),
+    adapter,
+  })
   if (!anchor) return null
 
   const quoteText = formatMarkdownQuote(selectedText)

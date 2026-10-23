@@ -185,6 +185,12 @@ export const platform: Platform = {
     })
   },
 
+  startCompletionPolling(poll: () => void): () => void {
+    // Userscripts have no extension background clock.
+    const timer = window.setInterval(poll, 200)
+    return () => window.clearInterval(timer)
+  },
+
   getNotificationSoundUrl(presetId: string): string | undefined {
     return window.__OPHEL_NOTIFICATION_SOUND_URLS__?.[presetId]
   },

@@ -17,6 +17,8 @@ const EMOJI_EXPORT = String.fromCodePoint(0x1f4e4) // 📤
 const EMOJI_USER = String.fromCodePoint(0x1f64b) // 🙋
 const EMOJI_ASSISTANT = String.fromCodePoint(0x1f916) // 🤖
 export const EXPORT_MARKDOWN_HREF_ATTR = "data-ophel-export-markdown-href"
+export const MARKDOWN_MATH_SELECTOR =
+  ".math-inline, .math-block, .katex, .katex-display, math, [data-math], [data-math-source], [data-custom-copy-text], [data-tex], [data-latex]"
 
 export interface ExportMessage {
   role: "user" | "assistant" | string
@@ -129,20 +131,36 @@ export function htmlToMarkdown(el: Element): string {
     return shouldUseMultilineDelimiters ? `\n$$\n${normalized}\n$$\n` : `\n$$${normalized}$$\n`
   }
 
-  const extractKatexLatex = (element: Element): string => {
-    const annotation = element.querySelector('annotation[encoding="application/x-tex"]')
-    const annotationText = annotation?.textContent?.trim()
-    if (annotationText) return annotationText
-
+  const extractMathLatex = (element: Element): string => {
     const dataTex =
-      (element as HTMLElement).getAttribute("data-tex") ||
-      (element as HTMLElement).getAttribute("data-latex")
-    if (dataTex) return dataTex.trim()
-
-    const ariaLabel = (element as HTMLElement).getAttribute("aria-label")
-    if (ariaLabel) return ariaLabel.trim()
-
-    return ""
+      element.getAttribute("data-math") ||
+      element.getAttribute("data-math-source") ||
+      element.getAttribute("data-custom-copy-text") ||
+      element.getAttribute("data-tex") ||
+      element.getAttribute("data-latex")
+    const annotation = element.querySelector('annotation[encoding="application/x-tex"]')
+    const source = (
+      dataTex ||
+      annotation?.textContent ||
+      element.getAttribute("aria-label") ||
+      ""
+    ).trim()
+    const delimiters = [
+      ["$$", "$$"],
+      ["\\[", "\\]"],
+      ["\\(", "\\)"],
+      ["$", "$"],
+    ]
+    for (const [open, close] of delimiters) {
+      if (
+        source.startsWith(open) &&
+        source.endsWith(close) &&
+        source.length > open.length + close.length
+      ) {
+        return source.slice(open.length, -close.length).trim()
+      }
+    }
+    return source
   }
 
   const extractTextWithLineBreaks = (node: Node): string => {
@@ -354,24 +372,14 @@ export function htmlToMarkdown(el: Element): string {
       }
 
       // 处理数学公式
-      if (element.classList?.contains("math-block")) {
-        const latex = element.getAttribute("data-math")
-        if (latex) return formatBlockMath(latex)
-      }
-
-      if (element.classList?.contains("math-inline")) {
-        const latex = element.getAttribute("data-math")
-        if (latex) return formatInlineMath(latex)
-      }
-
-      if (element.classList?.contains("katex-display")) {
-        const latex = extractKatexLatex(element)
-        if (latex) return formatBlockMath(latex)
-      }
-
-      if (element.classList?.contains("katex")) {
-        const latex = extractKatexLatex(element)
-        if (latex) return formatInlineMath(latex)
+      if (element.matches(MARKDOWN_MATH_SELECTOR)) {
+        const latex = extractMathLatex(element)
+        if (latex) {
+          const isBlock =
+            element.matches('.math-block, .katex-display, math[display="block"]') ||
+            Boolean(element.querySelector('.katex-display, math[display="block"]'))
+          return isBlock ? formatBlockMath(latex) : formatInlineMath(latex)
+        }
       }
 
       if (element.classList?.contains("katex-mathml")) {
@@ -452,7 +460,10 @@ export function htmlToMarkdown(el: Element): string {
         const tbody = element.querySelector("tbody")
 
         const getCellContent = (cell: Element): string => {
-          return cell.textContent?.trim() || ""
+          return renderChildren(cell as HTMLElement, context)
+            .trim()
+            .replace(/\|/g, "\\|")
+            .replace(/\r?\n/g, " ")
         }
 
         if (thead) {

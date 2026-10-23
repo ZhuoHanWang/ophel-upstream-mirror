@@ -10,7 +10,13 @@ import { TabManager } from "~core/tab-manager"
 import { platform } from "~platform"
 import type { Settings } from "~utils/storage"
 
-vi.mock("~platform", () => ({ platform: { notify: vi.fn(), focusWindow: vi.fn() } }))
+vi.mock("~platform", () => ({
+  platform: {
+    notify: vi.fn(),
+    focusWindow: vi.fn(),
+    startCompletionPolling: vi.fn(),
+  },
+}))
 vi.mock("~utils/i18n", () => ({ t: (key: string) => key }))
 
 // Expose private state only to drive production code with deterministic DOM timelines.
@@ -58,6 +64,10 @@ function fixture(site = "gemini", settings: Partial<Settings["tab"]> = {}) {
   vi.spyOn(window, "clearInterval").mockImplementation((id) => {
     if (id !== undefined) intervals.delete(id)
     clearInterval(id)
+  })
+  vi.mocked(platform.startCompletionPolling).mockImplementation((poll) => {
+    const id = window.setInterval(poll, 200)
+    return () => window.clearInterval(id)
   })
   document.body.innerHTML = '<div class="ql-editor" contenteditable="true" role="textbox"></div>'
   window.history.replaceState({}, "", "/app/test")
@@ -132,6 +142,68 @@ test("actual original notification path sends once with all required DOM evidenc
     f.close()
   }
 })
+
+test("opening old history before its replies load does not notify", () => {
+  const f = fixture()
+  try {
+    f.m.start()
+    const old = f.turn("old", { text: "", busy: true, actions: false })
+    f.poll(1100)
+    old.querySelector(".markdown")!.textContent = "restored historical answer"
+    old.querySelector(".markdown")!.setAttribute("aria-busy", "false")
+    const actions = f.document.createElement("message-actions")
+    actions.innerHTML = "<button></button>"
+    old.append(actions)
+    f.poll(1500)
+    f.poll(5000)
+    assert.equal(f.notices(), 0)
+    assert.equal(f.m.aiState, "idle")
+    assert.equal(f.m.completionTracker!.active, false)
+    assert.equal(f.intervals.size, 0)
+
+    f.m.completionTracker!.submit(5100)
+    f.turn("new")
+    f.poll(5200)
+    f.poll(6700)
+    assert.equal(f.notices(), 1)
+  } finally {
+    f.close()
+  }
+})
+
+test("history batches and history network activity do not manufacture a reply", () => {
+  const f = fixture()
+  try {
+    f.turn("old-one")
+    f.m.start()
+    f.m.beginNetworkGeneration()
+    f.turn("old-two")
+    f.poll(1100)
+    f.turn("old-three")
+    f.poll(1200)
+    f.poll(5000)
+    assert.equal(f.notices(), 0)
+    assert.equal(f.m.aiState, "idle")
+    assert.equal(f.intervals.size, 0)
+  } finally {
+    f.close()
+  }
+})
+
+test("history placeholders already present at startup do not notify", () => {
+  const f = fixture()
+  try {
+    const old = f.turn("old", { busy: true })
+    f.m.start()
+    old.querySelector("[aria-busy]")!.setAttribute("aria-busy", "false")
+    f.poll(1100)
+    f.poll(5000)
+    assert.equal(f.notices(), 0)
+    assert.equal(f.m.aiState, "idle")
+  } finally {
+    f.close()
+  }
+})
 test("foreground enabled ignores stale userSawCompletion on every new round", () => {
   const f = fixture()
   try {
@@ -176,6 +248,92 @@ test("background notifies even if foreground notifications are disabled", () => 
     f.poll(1100)
     f.poll(2600)
     assert.equal(f.notices(), 1)
+  } finally {
+    f.close()
+  }
+})
+
+test("background completion does not depend on page timers or a focus event", async () => {
+  const f = fixture("gemini", { notifyWhenFocused: false })
+  const polls: (() => void)[] = []
+  const stopPolling = vi.fn()
+  vi.mocked(platform.startCompletionPolling).mockImplementation((poll) => {
+    polls.push(poll)
+    return stopPolling
+  })
+  const pageTimer = vi.spyOn(window, "setInterval")
+  try {
+    f.m.isUserAway = () => true
+    f.m.start()
+    f.m.completionTracker!.submit(1000)
+    const t = f.turn("one", { busy: true })
+    await Promise.resolve()
+    assert.equal(polls.length, 1)
+    assert.equal(pageTimer.mock.calls.length, 0)
+
+    vi.setSystemTime(10000)
+    polls[0]()
+    assert.equal(f.notices(), 0)
+
+    t.querySelector("[aria-busy]")!.setAttribute("aria-busy", "false")
+    await Promise.resolve()
+    vi.setSystemTime(11000)
+    polls[0]()
+    vi.setSystemTime(12500)
+    polls[0]()
+    assert.equal(f.notices(), 1)
+    assert.equal(stopPolling.mock.calls.length, 1)
+
+    polls[0]()
+    f.m.onWindowFocus()
+    assert.equal(f.notices(), 1)
+  } finally {
+    f.close()
+  }
+})
+
+test("stopping tracking disconnects DOM observation and cancels the pending clock", async () => {
+  const f = fixture()
+  const stopPolling = vi.fn()
+  let poll = () => {}
+  vi.mocked(platform.startCompletionPolling).mockImplementation((callback) => {
+    poll = callback
+    return stopPolling
+  })
+  try {
+    f.m.start()
+    f.m.completionTracker!.submit(1000)
+    f.turn("one", { busy: true })
+    await Promise.resolve()
+    assert.equal(vi.mocked(platform.startCompletionPolling).mock.calls.length, 1)
+    f.m.stop()
+    assert.equal(stopPolling.mock.calls.length, 1)
+
+    f.turn("two")
+    await Promise.resolve()
+    vi.setSystemTime(10000)
+    poll()
+    assert.equal(vi.mocked(platform.startCompletionPolling).mock.calls.length, 1)
+    assert.equal(f.notices(), 0)
+  } finally {
+    f.close()
+  }
+})
+test("composer and Ophel UI changes do not scan replies, while a new turn does", async () => {
+  const f = fixture()
+  try {
+    f.m.start()
+    const pollCompletion = vi.spyOn(f.m, "pollCompletion")
+    f.document.querySelector(".ql-editor")!.textContent = "draft"
+    await Promise.resolve()
+    const ophelHost = f.document.createElement("plasmo-csui")
+    f.document.body.append(ophelHost)
+    await Promise.resolve()
+    assert.equal(pollCompletion.mock.calls.length, 0)
+
+    f.turn("new-turn", { busy: true })
+    await Promise.resolve()
+    assert.equal(pollCompletion.mock.calls.length, 1)
   } finally {
     f.close()
   }
@@ -289,7 +447,7 @@ test("settings stop/restart baselines history and removes event listeners", () =
     f.m.updateSettings({ ...f.m.settings, autoRename: true })
     f.poll(8000)
     assert.equal(f.notices(), 0)
-    assert.equal(f.intervals.size, 1)
+    assert.equal(f.intervals.size, 0)
   } finally {
     f.close()
   }
@@ -345,10 +503,51 @@ test("native Enter submission starts a short reply without a network start event
   }
 })
 
+test("native send-button submission starts a short reply without a stop control", () => {
+  const f = fixture()
+  try {
+    f.m.start()
+    const send = f.document.createElement("button")
+    send.className = "send-button submit"
+    f.document.body.append(send)
+    send.click()
+    f.turn("short")
+    f.poll(1100)
+    f.poll(2600)
+    assert.equal(f.notices(), 1)
+  } finally {
+    f.close()
+  }
+})
+
+test("native regenerate action preserves a busy-only regeneration", () => {
+  const f = fixture()
+  try {
+    const old = f.turn("old")
+    const regenerate = f.document.createElement("button")
+    regenerate.innerHTML = '<mat-icon fonticon="refresh"></mat-icon>'
+    old.querySelector("message-actions")!.append(regenerate)
+    f.m.start()
+    regenerate.querySelector("mat-icon")!.dispatchEvent(new MouseEvent("click", { bubbles: true }))
+    old.querySelector(".markdown")!.setAttribute("aria-busy", "true")
+    f.poll(1100)
+    assert.equal(f.notices(), 0)
+    old.querySelector(".markdown")!.textContent = "regenerated answer"
+    old.querySelector(".markdown")!.setAttribute("aria-busy", "false")
+    f.poll(1200)
+    f.poll(2700)
+    f.poll(5000)
+    assert.equal(f.notices(), 1)
+  } finally {
+    f.close()
+  }
+})
+
 test("busy on the response element itself blocks completion", () => {
   const f = fixture()
   try {
     f.m.start()
+    f.m.completionTracker!.submit(1000)
     const t = f.turn("one")
     t.querySelector("model-response")!.setAttribute("aria-busy", "true")
     f.poll(1100)
@@ -387,6 +586,7 @@ test("switching conversations cannot notify for the newly loaded history", () =>
   const f = fixture()
   try {
     f.m.start()
+    f.m.completionTracker!.submit(1000)
     f.turn("one", { busy: true })
     f.poll(1100)
     f.document.querySelector(".conversation-container")!.remove()

@@ -8,7 +8,10 @@
 import type { SiteAdapter } from "~adapters/base"
 import { VIRTUAL_CATEGORY } from "~constants"
 import { SITE_IDS } from "~constants/defaults"
-import { rememberQuickQuoteReferencesFromContent } from "~core/quick-quote-marker"
+import {
+  getQuickQuoteEditorContent,
+  rememberQuickQuoteReferencesFromContent,
+} from "~core/quick-quote-marker"
 import { DOMToolkit } from "~utils/dom-toolkit"
 import {
   filterPrompts,
@@ -112,6 +115,8 @@ export class PromptManager {
    * 插入提示词到输入框
    */
   async insertPrompt(content: string): Promise<boolean> {
+    // Quote anchors belong to Ophel's reference cache, not the site's draft or model input.
+    const editorContent = getQuickQuoteEditorContent(content)
     const retryDelays = [0, 80, 120, 180, 240]
 
     for (let index = 0; index < retryDelays.length; index++) {
@@ -121,16 +126,23 @@ export class PromptManager {
 
       // 首次优先复用已缓存的输入框：findTextarea 的可见性校验（offsetParent）会强制同步布局，
       // 在长对话页面上触发一次全文档样式重算；重试时仍重新查找，保留输入框失效后的恢复能力
-      if (index === 0) {
-        this.adapter.getTextareaElement()
-      } else {
-        this.adapter.findTextarea()
-      }
+      const editor = index === 0 ? this.adapter.getTextareaElement() : this.adapter.findTextarea()
 
-      const result = this.adapter.insertPrompt(content)
+      const result = this.adapter.insertPrompt(editorContent)
       if (result) {
         rememberQuickQuoteReferencesFromContent(content)
         return true
+      }
+
+      if (index === 0) {
+        const refreshedEditor = this.adapter.findTextarea()
+        if (refreshedEditor && refreshedEditor !== editor) {
+          const retryResult = this.adapter.insertPrompt(editorContent)
+          if (retryResult) {
+            rememberQuickQuoteReferencesFromContent(content)
+            return true
+          }
+        }
       }
     }
 

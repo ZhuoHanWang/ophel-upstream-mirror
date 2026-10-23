@@ -11,6 +11,7 @@ import {
   rememberManagedTabTitle,
   sanitizeConversationTitleCandidate,
 } from "~utils/conversation-title"
+import { OPHEL_INTERACTION_LAYER_SELECTOR } from "~utils/dom-toolkit"
 import { t } from "~utils/i18n"
 import {
   EVENT_MONITOR_COMPLETE,
@@ -24,6 +25,29 @@ import { CompletionTracker } from "./completion-tracker"
 
 const BACKGROUND_IDLE_TITLE_UPDATE_INTERVAL_MS = 15_000
 const DEFAULT_RENAME_INTERVAL_SECONDS = 5
+const COMPLETION_IGNORED_SELECTOR = [
+  "input",
+  "textarea",
+  "[contenteditable='true']",
+  ".ProseMirror",
+  "plasmo-csui",
+  "#ophel-userscript-root",
+  ".gh-root",
+  ".gh-main-panel",
+  OPHEL_INTERACTION_LAYER_SELECTOR,
+].join(", ")
+
+const isIgnoredCompletionNode = (node: Node): boolean => {
+  const element = node instanceof Element ? node : node.parentElement
+  return Boolean(element?.closest(COMPLETION_IGNORED_SELECTOR))
+}
+
+const isIgnoredCompletionMutation = (mutation: MutationRecord): boolean => {
+  if (isIgnoredCompletionNode(mutation.target)) return true
+  if (mutation.type !== "childList") return false
+  const changedNodes = [...mutation.addedNodes, ...mutation.removedNodes]
+  return changedNodes.length > 0 && changedNodes.every(isIgnoredCompletionNode)
+}
 
 export class TabManager {
   private adapter: SiteAdapter
@@ -46,7 +70,8 @@ export class TabManager {
   private domCompletionIntervalId: number | null = null
   private domCompletionTrackingStartedAt = 0
   private completionTracker: CompletionTracker | null = null
-  private completionPollTimer: number | null = null
+  private completionObserver: MutationObserver | null = null
+  private stopCompletionPolling: (() => void) | null = null
   private readonly handleCompletionSubmit = (event: Event) => {
     if (!this.adapter.isCompletionSubmitEvent(event)) return
     this.stopNotificationPlayback()
@@ -187,8 +212,10 @@ export class TabManager {
     if (!this.isRunning) return
 
     this.isRunning = false
-    if (this.completionPollTimer !== null) window.clearInterval(this.completionPollTimer)
-    this.completionPollTimer = null
+    this.completionObserver?.disconnect()
+    this.completionObserver = null
+    this.stopCompletionPolling?.()
+    this.stopCompletionPolling = null
     this.completionTracker = null
     document.removeEventListener("keydown", this.handleCompletionSubmit, true)
     document.removeEventListener("click", this.handleCompletionSubmit, true)
@@ -601,8 +628,8 @@ export class TabManager {
 
   private beginNetworkGeneration(payload?: MonitorEventPayload) {
     if (this.completionTracker) {
-      this.stopNotificationPlayback()
-      this.completionTracker.networkStart(Date.now())
+      // Gemini history requests also match the monitor. Network activity can
+      // request a DOM check, but cannot authorize a new completion round.
       this.pollCompletion()
       return
     }
@@ -903,10 +930,36 @@ export class TabManager {
       },
     )
     this.completionTracker.observe(snapshot, Date.now())
-    this.pollCompletion()
     document.addEventListener("keydown", this.handleCompletionSubmit, true)
     document.addEventListener("click", this.handleCompletionSubmit, true)
-    this.completionPollTimer = window.setInterval(() => this.pollCompletion(), 200)
+    // DOM changes start tracking without waiting for a hidden page's timer.
+    this.completionObserver = new MutationObserver((mutations) => {
+      // Pending replies already have a clock; avoid hashing every streamed token.
+      if (
+        !this.completionTracker?.active &&
+        mutations.some((mutation) => !isIgnoredCompletionMutation(mutation))
+      ) {
+        this.pollCompletion()
+      }
+    })
+    this.completionObserver.observe(document.body, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: [
+        "class",
+        "style",
+        "hidden",
+        "disabled",
+        "aria-disabled",
+        "aria-busy",
+        "contenteditable",
+        "src",
+        "srcset",
+      ],
+    })
+    this.pollCompletion()
   }
 
   private pollCompletion() {
@@ -916,12 +969,19 @@ export class TabManager {
     this.completionTracker.observe(snapshot, Date.now())
     this.adapter.setNetworkGenerationState(this.completionTracker.active)
     if (this.completionTracker.active && this.aiState !== "generating") {
+      this.stopNotificationPlayback()
       this.lastAiState = this.aiState
       this.aiState = "generating"
       this.userSawCompletion = false
       this.completionViewed = false
       this.updateTabName()
       this.scheduleNextTitleUpdate(true)
+    }
+    if (this.completionTracker.active) {
+      this.stopCompletionPolling ??= platform.startCompletionPolling(() => this.pollCompletion())
+    } else {
+      this.stopCompletionPolling?.()
+      this.stopCompletionPolling = null
     }
   }
 
